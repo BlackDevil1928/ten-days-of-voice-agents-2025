@@ -1,0 +1,11 @@
+{
+    "drinkType": "cappuccino",
+    "size": "small",
+    "milk": "soy",
+    "extras": [
+        "honey"
+    ],
+    "name": "Shish",
+    "timestamp": "2025-11-23T19:23:26.835802",
+    "session_id": "session_20251123_192326"
+}
