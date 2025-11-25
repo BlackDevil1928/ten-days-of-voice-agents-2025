@@ -1,34 +1,14 @@
-
-
-# ======================================================
-# 🎯 COFFEE SHOP VOICE AGENT TUTORIAL 
-# 👨‍⚕️ 
-# 💼 Professional Voice AI Development Course
-# 🚀 Advanced Agent Patterns & Real-world Implementation
-# ======================================================
-#
-# 🎉 
-# 📺 
-# 💡 Master AI Development with Real Projects
-#
-# ======================================================
-
+#!/usr/bin/env python3
 import logging
 import json
 import os
-import asyncio
-from datetime import datetime
-from typing import Annotated, Literal
-from dataclasses import dataclass, field
-
-print("\n" + "🎯" * 50)
-print("🚀 COFFEE SHOP AGENT ")
-print("📚 ")
-print("💡 agent.py LOADED SUCCESSFULLY!")
-print("🎯" * 50 + "\n")
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field, asdict
+from typing import Annotated, List, Optional
 
 from dotenv import load_dotenv
 from pydantic import Field
+
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -37,375 +17,287 @@ from livekit.agents import (
     RoomInputOptions,
     WorkerOptions,
     cli,
-    tokenize,
-    metrics,
-    MetricsCollectedEvent,
-    RunContext,
     function_tool,
+    RunContext,
 )
 
-from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
+from livekit.plugins import murf, silero, google, deepgram
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-logger = logging.getLogger("agent")
+# -------------------------
+# Basic config
+# -------------------------
+logger = logging.getLogger("wellness_agent")
 load_dotenv(".env.local")
 
-# ======================================================
-# 🛒 ORDER MANAGEMENT SYSTEM
-# ======================================================
+# -------------------------
+# Data models
+# -------------------------
 @dataclass
-class OrderState:
-    """☕ Coffee shop order state with validation"""
-    drinkType: str | None = None
-    size: str | None = None
-    milk: str | None = None
-    extras: list[str] = field(default_factory=list)
-    name: str | None = None
-    
+class CheckInState:
+    mood: Optional[str] = None           # free-text mood, or numeric string like "3/5"
+    energy: Optional[str] = None         # free-text energy
+    objectives: List[str] = field(default_factory=list)
+    advice_given: Optional[str] = None
+
     def is_complete(self) -> bool:
-        """✅ Check if all required fields are filled"""
-        return all([
-            self.drinkType is not None,
-            self.size is not None,
-            self.milk is not None,
-            self.extras is not None,
-            self.name is not None
-        ])
-    
-    def to_dict(self) -> dict:
-        """📦 Convert to dictionary for JSON serialization"""
-        return {
-            "drinkType": self.drinkType,
-            "size": self.size,
-            "milk": self.milk,
-            "extras": self.extras,
-            "name": self.name
-        }
-    
-    def get_summary(self) -> str:
-        """📋 Get friendly order summary"""
-        if not self.is_complete():
-            return "🔄 Order in progress..."
-        
-        extras_text = f" with {', '.join(self.extras)}" if self.extras else ""
-        return f"☕ {self.size.upper()} {self.drinkType.title()} with {self.milk.title()} milk{extras_text} for {self.name}"
+        return bool(self.mood and self.energy and len(self.objectives) > 0)
+
+    def to_dict(self):
+        return asdict(self)
+
 
 @dataclass
 class Userdata:
-    """👤 User session data"""
-    order: OrderState
+    current_checkin: CheckInState
+    history_summary: str
     session_start: datetime = field(default_factory=datetime.now)
 
-# ======================================================
-# 🛠️ BARISTA AGENT FUNCTION TOOLS
-# ======================================================
 
-@function_tool
-async def set_drink_type(
-    ctx: RunContext[Userdata],
-    drink: Annotated[
-        Literal["latte", "cappuccino", "americano", "espresso", "mocha", "coffee", "cold brew", "matcha"],
-        Field(description="🎯 The type of coffee drink the customer wants"),
-    ],
-) -> str:
-    """☕ Set the drink type. Call when customer specifies which coffee they want."""
-    ctx.userdata.order.drinkType = drink
-    print(f"✅ DRINK SET: {drink.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"☕ Excellent choice! One {drink} coming up!"
+# -------------------------
+# Persistence (JSON)
+# -------------------------
+LOG_FILE = "wellness_log.json"
 
-@function_tool
-async def set_size(
-    ctx: RunContext[Userdata],
-    size: Annotated[
-        Literal["small", "medium", "large", "extra large"],
-        Field(description="📏 The size of the drink"),
-    ],
-) -> str:
-    """📏 Set the size. Call when customer specifies drink size."""
-    ctx.userdata.order.size = size
-    print(f"✅ SIZE SET: {size.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"📏 {size.title()} size - perfect for your {ctx.userdata.order.drinkType}!"
+def get_log_path() -> str:
+    # store in current working directory of the backend (safe)
+    return os.path.join(os.getcwd(), LOG_FILE)
 
-@function_tool
-async def set_milk(
-    ctx: RunContext[Userdata],
-    milk: Annotated[
-        Literal["whole", "skim", "almond", "oat", "soy", "coconut", "none"],
-        Field(description="🥛 The type of milk for the drink"),
-    ],
-) -> str:
-    """🥛 Set milk preference. Call when customer specifies milk type."""
-    ctx.userdata.order.milk = milk
-    print(f"✅ MILK SET: {milk.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    
-    if milk == "none":
-        return "🥛 Got it! Black coffee - strong and simple!"
-    return f"🥛 {milk.title()} milk - great choice!"
-
-@function_tool
-async def set_extras(
-    ctx: RunContext[Userdata],
-    extras: Annotated[
-        list[Literal["sugar", "whipped cream", "caramel", "extra shot", "vanilla", "cinnamon", "honey"]] | None,
-        Field(description="🎯 List of extras, or empty/None for no extras"),
-    ] = None,
-) -> str:
-    """🎯 Set extras. Call when customer specifies add-ons or says no extras."""
-    ctx.userdata.order.extras = extras if extras else []
-    print(f"✅ EXTRAS SET: {ctx.userdata.order.extras}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    
-    if ctx.userdata.order.extras:
-        return f"🎯 Added {', '.join(ctx.userdata.order.extras)} - making it special!"
-    return "🎯 No extras - keeping it classic and delicious!"
-
-@function_tool
-async def set_name(
-    ctx: RunContext[Userdata],
-    name: Annotated[str, Field(description="👤 Customer's name for the order")],
-) -> str:
-    """👤 Set customer name. Call when customer provides their name."""
-    ctx.userdata.order.name = name.strip().title()
-    print(f"✅ NAME SET: {ctx.userdata.order.name}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"👤 Wonderful, {ctx.userdata.order.name}! Almost ready to complete your order!"
-
-@function_tool
-async def complete_order(ctx: RunContext[Userdata]) -> str:
-    """🎉 Finalize and save order to JSON. ONLY call when ALL fields are filled."""
-    order = ctx.userdata.order
-    
-    if not order.is_complete():
-        missing = []
-        if not order.drinkType: missing.append("☕ drink type")
-        if not order.size: missing.append("📏 size")
-        if not order.milk: missing.append("🥛 milk")
-        if order.extras is None: missing.append("🎯 extras")
-        if not order.name: missing.append("👤 name")
-        
-        print(f"❌ CANNOT COMPLETE - Missing: {', '.join(missing)}")
-        return f"🔄 Almost there! Just need: {', '.join(missing)}"
-    
-    print(f"🎉 ORDER READY FOR COMPLETION: {order.get_summary()}")
-    
+def load_history() -> List[dict]:
+    path = get_log_path()
+    if not os.path.exists(path):
+        return []
     try:
-        save_order_to_json(order)
-        extras_text = f" with {', '.join(order.extras)}" if order.extras else ""
-        
-        print("\n" + "⭐" * 60)
-        print("🎉 ORDER COMPLETED SUCCESSFULLY!")
-        print(f"👤 Customer: {order.name}")
-        print(f"☕ Order: {order.size} {order.drinkType} with {order.milk} milk{extras_text}")
-        print("📺 ")
-        print("⭐" * 60 + "\n")
-        
-        return f"""🎉 PERFECT! Your {order.size} {order.drinkType} with {order.milk} milk{extras_text} is confirmed, {order.name}! 
-
-⏰ We're preparing your drink now - it'll be ready in 3-5 minutes!
-
-📺 **Thanks for using our AI Barista!** 
-👉 Don't forget rate Our Cafe"""
-        
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
     except Exception as e:
-        print(f"❌ ORDER SAVE FAILED: {e}")
-        return "⚠️ Order recorded but there was a small issue. Don't worry, we'll make your drink right away!"
+        logger.warning("Could not read history file: %s", e)
+        return []
+
+def save_checkin_entry(entry: CheckInState) -> None:
+    path = get_log_path()
+    history = load_history()
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "mood": entry.mood,
+        "energy": entry.energy,
+        "objectives": entry.objectives,
+        "summary": entry.advice_given,
+    }
+    history.append(record)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=4, ensure_ascii=False)
+        logger.info("Saved check-in to %s", path)
+    except Exception as e:
+        logger.exception("Failed to save check-in: %s", e)
+
+
+# -------------------------
+# Helper: parse numeric mood (optional)
+# -------------------------
+def parse_mood_numeric(mood_str: Optional[str]) -> Optional[float]:
+    """
+    Try to parse mood like '3/5' or '4' into float 0-5 scale.
+    Returns float or None if not parseable.
+    """
+    if not mood_str:
+        return None
+    s = mood_str.strip()
+    # formats: "3/5", "4", "4.0", "5/10" (normalize to 0-5)
+    try:
+        if "/" in s:
+            num, den = s.split("/", 1)
+            num = float(num.strip())
+            den = float(den.strip())
+            if den == 0:
+                return None
+            # convert to 0-5 scale
+            return float(num) * 5.0 / float(den)
+        else:
+            # assume 0-5 or 0-10 — clamp if needed
+            val = float(s)
+            if 0 <= val <= 5:
+                return val
+            if 0 <= val <= 10:
+                return val * 0.5
+            # otherwise normalize roughly
+            return None
+    except Exception:
+        return None
+
+
+# -------------------------
+# Tool functions (exposed to the LLM)
+# -------------------------
+@function_tool
+async def record_mood_and_energy(
+    ctx: RunContext[Userdata],
+    mood: Annotated[str, Field(description="User mood (text or simple scale, e.g. '3/5')")],
+    energy: Annotated[str, Field(description="User energy level (text)")]
+) -> str:
+    ctx.userdata.current_checkin.mood = mood
+    ctx.userdata.current_checkin.energy = energy
+    logger.info("Recorded mood=%s energy=%s", mood, energy)
+    return f"Got it — mood recorded as '{mood}' and energy as '{energy}'."
 
 @function_tool
-async def get_order_status(ctx: RunContext[Userdata]) -> str:
-    """📊 Get current order status. Call when customer asks about their order."""
-    order = ctx.userdata.order
-    if order.is_complete():
-        return f"📊 Your order is complete! {order.get_summary()}"
-    
-    progress = order.get_summary()
-    return f"📊 Order in progress: {progress}"
+async def record_objectives(
+    ctx: RunContext[Userdata],
+    objectives: Annotated[List[str], Field(description="1-3 objectives for the day")]
+) -> str:
+    # limit to 1-3 items (truncate if more)
+    cleaned = [o.strip() for o in objectives if o and o.strip()]
+    ctx.userdata.current_checkin.objectives = cleaned[:3]
+    logger.info("Recorded objectives: %s", ctx.userdata.current_checkin.objectives)
+    return f"I've saved {len(ctx.userdata.current_checkin.objectives)} objectives."
 
-class BaristaAgent(Agent):
-    def __init__(self):
+@function_tool
+async def complete_checkin(
+    ctx: RunContext[Userdata],
+    final_advice_summary: Annotated[str, Field(description="Short one-sentence summary/advice")]
+) -> str:
+    state = ctx.userdata.current_checkin
+    state.advice_given = final_advice_summary
+
+    if not state.is_complete():
+        return "I can't finish the check-in yet. I still need your mood, energy, or at least one goal."
+
+    save_checkin_entry(state)
+
+    recap = (
+        f"Here's your recap: You are feeling {state.mood} and your energy is {state.energy}. "
+        f"Your goals are: {', '.join(state.objectives)}. "
+        f"Remember: {final_advice_summary}"
+    )
+    logger.info("Check-in complete.")
+    return recap
+
+@function_tool
+async def get_weekly_summary(
+    ctx: RunContext[Userdata],
+    days: Annotated[int, Field(description="Number of past days to include (default 7)")] = 7
+) -> str:
+    """
+    Compute simple aggregates over the last `days` days.
+    Looks for numeric mood entries (3/5, 4/5, 4, etc.) and counts days with objectives.
+    """
+    try:
+        days = int(days)
+    except Exception:
+        days = 7
+    history = load_history()
+    if not history:
+        return "No history yet to compute a weekly summary."
+
+    cutoff = datetime.now() - timedelta(days=days)
+    recent = []
+    for entry in reversed(history):  # newest first
+        try:
+            ts = datetime.fromisoformat(entry.get("timestamp"))
+        except Exception:
+            continue
+        if ts >= cutoff:
+            recent.append(entry)
+        else:
+            break
+
+    if not recent:
+        return f"No check-ins in the last {days} days."
+
+    numeric_moods = []
+    goal_days = 0
+    for e in recent:
+        m = parse_mood_numeric(e.get("mood"))
+        if m is not None:
+            numeric_moods.append(m)
+        if e.get("objectives"):
+            if len(e.get("objectives")) > 0:
+                goal_days += 1
+
+    avg_mood = round(sum(numeric_moods) / len(numeric_moods), 2) if numeric_moods else None
+    total = len(recent)
+    summary_parts = []
+    if avg_mood is not None:
+        summary_parts.append(f"Average mood (converted to 0-5) over last {len(numeric_moods)} entries: {avg_mood}/5")
+    else:
+        summary_parts.append("No numeric mood entries to compute an average.")
+    summary_parts.append(f"{goal_days} of {total} days had at least one objective.")
+    return " ".join(summary_parts)
+
+
+# -------------------------
+# Agent definition
+# -------------------------
+class WellnessAgent(Agent):
+    def __init__(self, history_context: str):
         super().__init__(
-            instructions="""
-            🏪 You are a FRIENDLY and PROFESSIONAL barista at "Shish's Cafe".
-            
-            🎯 MISSION: Take coffee orders by systematically collecting:
-            ☕ Drink Type: latte, cappuccino, americano, espresso, mocha, coffee, cold brew, matcha
-            📏 Size: small, medium, large, extra large
-            🥛 Milk: whole, skim, almond, oat, soy, coconut, none
-            🎯 Extras: sugar, whipped cream, caramel, extra shot, vanilla, cinnamon, honey, or none
-            👤 Customer Name: for the order
-            
-            📝 PROCESS:
-            1. Greet warmly and ask for drink type
-            2. Ask for size preference  
-            3. Ask for milk choice
-            4. Ask about extras
-            5. Get customer name
-            6. Confirm and complete order
-            
-            🎨 STYLE:
-            - Be warm, enthusiastic, and professional
-            - Use emojis to make it friendly
-            - Ask one question at a time
-            - Confirm choices as you go
-            - Celebrate when order is complete
-            
-            🛠️ Use the function tools to record each piece of information.
-            📺 !
-            """,
-            tools=[
-                set_drink_type,
-                set_size,
-                set_milk,
-                set_extras,
-                set_name,
-                complete_order,
-                get_order_status,
-            ],
+            instructions=f"""
+You are a calm, supportive, non-medical wellness companion that conducts a short daily check-in.
+
+Goals:
+1) Ask how the user is feeling (mood) and their energy level.
+2) Ask for 1-3 objectives for the day.
+3) Give small, grounded, non-medical advice (e.g., take a 5-minute walk, break large tasks).
+4) Recap the mood and objectives and ask "Does this sound right?".
+5) Use the JSON history to reference past sessions when relevant.
+
+If the user asks for a weekly summary or trends, call get_weekly_summary.
+
+DO NOT give medical advice or diagnoses. If the user indicates crisis/self-harm, advise contacting a professional immediately.
+
+Context from previous sessions (brief):
+{history_context}
+""",
+            tools=[record_mood_and_energy, record_objectives, complete_checkin, get_weekly_summary]
         )
 
-def create_empty_order():
-    """🆕 Create a fresh order state"""
-    return OrderState()
 
-# ======================================================
-# 💾 ORDER STORAGE & PERSISTENCE
-# ======================================================
-def get_orders_folder():
-    """📁 Get the orders directory path"""
-    base_dir = os.path.dirname(__file__)   # src/
-    backend_dir = os.path.abspath(os.path.join(base_dir, ".."))
-    folder = os.path.join(backend_dir, "orders")
-    os.makedirs(folder, exist_ok=True)
-    return folder
-
-def save_order_to_json(order: OrderState) -> str:
-    """💾 Save order to JSON file with enhanced logging"""
-    print(f"\n🔄 ATTEMPTING TO SAVE ORDER...")
-    folder = get_orders_folder()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"order_{timestamp}.json"
-    path = os.path.join(folder, filename)
-
-    try:
-        order_data = order.to_dict()
-        order_data["timestamp"] = datetime.now().isoformat()
-        order_data["session_id"] = f"session_{timestamp}"
-        
-        with open(path, "w", encoding='utf-8') as f:
-            json.dump(order_data, f, indent=4, ensure_ascii=False)
-        
-        print("\n" + "✅" * 30)
-        print("🎉 ORDER SAVED SUCCESSFULLY!")
-        print(f"📁 Location: {path}")
-        print(f"👤 Customer: {order.name}")
-        print(f"☕ Order: {order.get_summary()}")
-        print("📺")
-        print("✅" * 30 + "\n")
-        
-        return path
-        
-    except Exception as e:
-        print(f"\n❌ CRITICAL ERROR SAVING ORDER: {e}")
-        print(f"📁 Attempted path: {path}")
-        print("🚨 Please check directory permissions!")
-        raise e
-
-# ======================================================
-# 🧪 SYSTEM VALIDATION & TESTING
-# ======================================================
-def test_order_saving():
-    """🧪 Test function to verify order saving works"""
-    print("\n🧪 RUNNING ORDER SAVING TEST...")
-    
-    test_order = OrderState()
-    test_order.drinkType = "latte"
-    test_order.size = "medium"
-    test_order.milk = "oat"
-    test_order.extras = ["extra shot", "vanilla"]
-    test_order.name = "TestCustomer"
-    
-    try:
-        path = save_order_to_json(test_order)
-        print(f"🎯 TEST RESULT: ✅ SUCCESS - Saved to {path}")
-        return True
-    except Exception as e:
-        print(f"🎯 TEST RESULT: ❌ FAILED - {e}")
-        return False
-
-# ======================================================
-# 🔧 SYSTEM INITIALIZATION & PREWARMING
-# ======================================================
+# -------------------------
+# Entrypoint & initialization
+# -------------------------
 def prewarm(proc: JobProcess):
-    """🔥 Preload VAD model for better performance"""
-    print("🔥 Prewarming VAD model...")
+    # load silero VAD to speed up session start
     proc.userdata["vad"] = silero.VAD.load()
-    print("✅ VAD model loaded successfully!")
 
-# ======================================================
-# 🎬 AGENT SESSION MANAGEMENT
-# ======================================================
 async def entrypoint(ctx: JobContext):
-    """🎬 Main agent entrypoint - handles customer sessions"""
-    ctx.log_context_fields = {"room": ctx.room.name}
+    # build a short history summary to pass into the agent prompt
+    history = load_history()
+    if history:
+        last = history[-1]
+        last_time = last.get("timestamp", "unknown time")
+        last_mood = last.get("mood", "unknown mood")
+        last_energy = last.get("energy", "unknown energy")
+        last_goals = ", ".join(last.get("objectives", [])) or "no goals recorded"
+        history_context = f"Last check-in on {last_time}: mood={last_mood}, energy={last_energy}, goals={last_goals}."
+        logger.info("Loaded history context: %s", history_context)
+    else:
+        history_context = "No previous check-ins."
 
-    print("\n" + "🏪" * 25)
-    print("🚀 BREW & BEAN CAFE - AI BARISTA")
-    print("👨‍⚕️ ")
-    print("📺 ")
-    print("📁 Orders folder:", get_orders_folder())
-    print("🎤 Ready to take customer orders!")
-    print("🏪" * 25 + "\n")
+    userdata = Userdata(current_checkin=CheckInState(), history_summary=history_context)
 
-    # Run test to verify everything works
-    test_order_saving()
-
-    # Create user session data with empty order
-    userdata = Userdata(order=create_empty_order())
-    
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"\n🆕 NEW CUSTOMER SESSION: {session_id}")
-    print(f"📝 Initial order state: {userdata.order.get_summary()}\n")
-
-    # Create session with userdata
+    # Create the session — ensure your environment has the required API keys
     session = AgentSession(
-        stt=deepgram.STT(model="nova-3"),
-        llm=google.LLM(model="gemini-2.5-flash"),
+        stt=deepgram.STT(model="nova-3", api_key=os.getenv("DEEPGRAM_API_KEY")),
+        llm=google.LLM(model="gemini-2.5-flash", api_key=os.getenv("GOOGLE_API_KEY")),
         tts=murf.TTS(
-            voice="en-US-matthew",
-            style="Conversation",
-            text_pacing=True,
+            api_key=os.getenv("MURF_API_KEY"),
+            voice="en-US-natalie",
+            style="narration",
+            text_pacing=True
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        userdata=userdata,  # Pass userdata to session
+        userdata=userdata
     )
 
-    # Metrics collection
-    usage_collector = metrics.UsageCollector()
-    @session.on("metrics_collected")
-    def _on_metrics(ev: MetricsCollectedEvent):
-        usage_collector.collect(ev.metrics)
-
+    # Start the agent + room loop
     await session.start(
-        agent=BaristaAgent(),
+        agent=WellnessAgent(history_context=history_context),
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
-        ),
+        room_input_options=RoomInputOptions()
     )
 
-    await ctx.connect()
-
-# ======================================================
-# ⚡ APPLICATION BOOTSTRAP & LAUNCH
-# ======================================================
 if __name__ == "__main__":
-    print("\n" + "⚡" * 25)
-    print("🎬 STARTING COFFEE SHOP AGENT...")
-    print("👨‍⚕️ ")
-    print("📺")
-    print("⚡" * 25 + "\n")
-    
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
