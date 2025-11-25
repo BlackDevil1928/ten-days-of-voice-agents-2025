@@ -1,0 +1,38 @@
+[
+    {
+        "timestamp": "2025-11-24T19:07:11.657827",
+        "mood": "low",
+        "energy": "two",
+        "objectives": [
+            "study on my exam"
+        ],
+        "summary": "You're feeling low with low energy, and your goal is to study for an exam. Break down your study into smaller, manageable steps and take breaks as needed."
+    },
+    {
+        "timestamp": "2025-11-24T19:24:07.141973",
+        "mood": "little low",
+        "energy": "one",
+        "objectives": [
+            "schedule for my exam"
+        ],
+        "summary": "You're feeling a little low with low energy, and your objective is to schedule your exam. Remember to break this task into smaller steps to make it more manageable."
+    },
+    {
+        "timestamp": "2025-11-24T19:27:53.841521",
+        "mood": "motivated",
+        "energy": "high",
+        "objectives": [
+            "play a match"
+        ],
+        "summary": "You're feeling motivated with high energy, and your objective is to play a match. Consider a warm-up routine."
+    },
+    {
+        "timestamp": "2025-11-24T19:38:05.534509",
+        "mood": "low",
+        "energy": "two",
+        "objectives": [
+            "study for my exam"
+        ],
+        "summary": "You're feeling low with energy level two, and your objective is to study for your exam. Remember to break down your study time and take short breaks to make it more manageable."
+    }
+]
