@@ -1,31 +1,17 @@
-
-
+#!/usr/bin/env python3
 # ======================================================
-# 🎯 COFFEE SHOP VOICE AGENT TUTORIAL 
-# 👨‍⚕️ 
-# 💼 Professional Voice AI Development Course
-# 🚀 Advanced Agent Patterns & Real-world Implementation
+# 💼 DAY 5: AI SALES DEVELOPMENT REP (SDR) - VipuXAi
 # ======================================================
-#
-# 🎉 
-# 📺 
-# 💡 Master AI Development with Real Projects
-#
-# ======================================================
-
 import logging
 import json
 import os
-import asyncio
 from datetime import datetime
-from typing import Annotated, Literal
-from dataclasses import dataclass, field
+from typing import Annotated, Literal, Optional, List
+from dataclasses import dataclass, asdict
 
-print("\n" + "🎯" * 50)
-print("🚀 COFFEE SHOP AGENT ")
-print("📚 ")
-print("💡 agent.py LOADED SUCCESSFULLY!")
-print("🎯" * 50 + "\n")
+print("\n" + "💼" * 40)
+print("🚀 VipuXAi SDR AGENT - READY")
+print("💼" * 40 + "\n")
 
 from dotenv import load_dotenv
 from pydantic import Field
@@ -37,375 +23,284 @@ from livekit.agents import (
     RoomInputOptions,
     WorkerOptions,
     cli,
-    tokenize,
-    metrics,
-    MetricsCollectedEvent,
-    RunContext,
     function_tool,
+    RunContext,
 )
 
+# Plugins
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-logger = logging.getLogger("agent")
+# ------------------------
+# Basic config
+# ------------------------
+logger = logging.getLogger("vipu_sdr")
+logging.basicConfig(level=logging.INFO)
 load_dotenv(".env.local")
 
-# ======================================================
-# 🛒 ORDER MANAGEMENT SYSTEM
-# ======================================================
+# Files (safe paths)
+LEADS_FILE = os.path.join(os.getcwd(), "leads_db.json")
+FAQ_FILE = os.path.join(os.getcwd(), "store_faq.json")
+
+# ------------------------
+# VipuXAi FAQ (company-specific)
+# ------------------------
+DEFAULT_FAQ = [
+    {
+        "question": "What is VipuXAi?",
+        "answer": "VipuXAi is a SaaS platform offering Voice AI solutions, voice agents, training, and enterprise consulting for automating customer support, bookings, and lead outreach."
+    },
+    {
+        "question": "What products do you offer?",
+        "answer": "We offer: (1) VipuVoice Platform — hosted voice-agent platform, (2) Custom Voice Agent development & integration, (3) Training & workshops, and (4) Managed consulting services."
+    },
+    {
+        "question": "What are typical pricing options?",
+        "answer": "We have three tiers: Starter (for SMBs), Pro (growing teams), and Enterprise (custom pricing). For exact quotes, we provide tailored proposals based on scope."
+    },
+    {
+        "question": "Do you provide integrations?",
+        "answer": "Yes — we integrate with CRMs (HubSpot, Salesforce), calendar systems, and ticketing platforms. We also offer MCP connectors for Notion, Todoist, and Zapier workflows."
+    },
+    {
+        "question": "Can you build a voice agent for my business?",
+        "answer": "Absolutely — we offer end-to-end development from design to production and monitoring. We'll typically ask about your use-case, traffic, required channels, and timeline."
+    }
+]
+
+def ensure_faq_file():
+    """Create default FAQ file if missing and return FAQ text for the prompt."""
+    try:
+        if not os.path.exists(FAQ_FILE):
+            with open(FAQ_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_FAQ, f, indent=4, ensure_ascii=False)
+        with open(FAQ_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # Return joined FAQ text for prompt embedding
+            return "\n".join([f"Q: {i['question']}\nA: {i['answer']}" for i in data])
+    except Exception as e:
+        logger.exception("Could not load or create FAQ file: %s", e)
+        return "\n".join([f"Q: {q['question']}\nA: {q['answer']}" for q in DEFAULT_FAQ])
+
+STORE_FAQ_TEXT = ensure_faq_file()
+
+# ------------------------
+# Lead structure
+# ------------------------
 @dataclass
-class OrderState:
-    """☕ Coffee shop order state with validation"""
-    drinkType: str | None = None
-    size: str | None = None
-    milk: str | None = None
-    extras: list[str] = field(default_factory=list)
-    name: str | None = None
-    
-    def is_complete(self) -> bool:
-        """✅ Check if all required fields are filled"""
-        return all([
-            self.drinkType is not None,
-            self.size is not None,
-            self.milk is not None,
-            self.extras is not None,
-            self.name is not None
-        ])
-    
-    def to_dict(self) -> dict:
-        """📦 Convert to dictionary for JSON serialization"""
-        return {
-            "drinkType": self.drinkType,
-            "size": self.size,
-            "milk": self.milk,
-            "extras": self.extras,
-            "name": self.name
-        }
-    
-    def get_summary(self) -> str:
-        """📋 Get friendly order summary"""
-        if not self.is_complete():
-            return "🔄 Order in progress..."
-        
-        extras_text = f" with {', '.join(self.extras)}" if self.extras else ""
-        return f"☕ {self.size.upper()} {self.drinkType.title()} with {self.milk.title()} milk{extras_text} for {self.name}"
+class LeadProfile:
+    name: Optional[str] = None
+    company: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    use_case: Optional[str] = None
+    team_size: Optional[str] = None
+    timeline: Optional[str] = None
+
+    def is_qualified(self) -> bool:
+        return bool(self.name and self.email and self.use_case)
 
 @dataclass
 class Userdata:
-    """👤 User session data"""
-    order: OrderState
-    session_start: datetime = field(default_factory=datetime.now)
+    lead_profile: LeadProfile
 
-# ======================================================
-# 🛠️ BARISTA AGENT FUNCTION TOOLS
-# ======================================================
-
+# ------------------------
+# Tools
+# ------------------------
 @function_tool
-async def set_drink_type(
+async def update_lead_profile(
     ctx: RunContext[Userdata],
-    drink: Annotated[
-        Literal["latte", "cappuccino", "americano", "espresso", "mocha", "coffee", "cold brew", "matcha"],
-        Field(description="🎯 The type of coffee drink the customer wants"),
-    ],
+    name: Annotated[Optional[str], Field(description="Customer's name")] = None,
+    company: Annotated[Optional[str], Field(description="Customer's company")] = None,
+    email: Annotated[Optional[str], Field(description="Customer's email")] = None,
+    role: Annotated[Optional[str], Field(description="Job title")] = None,
+    use_case: Annotated[Optional[str], Field(description="What they want to build or learn")] = None,
+    team_size: Annotated[Optional[str], Field(description="Team size")] = None,
+    timeline: Annotated[Optional[str], Field(description="Desired timeline")] = None,
 ) -> str:
-    """☕ Set the drink type. Call when customer specifies which coffee they want."""
-    ctx.userdata.order.drinkType = drink
-    print(f"✅ DRINK SET: {drink.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"☕ Excellent choice! One {drink} coming up!"
+    profile = ctx.userdata.lead_profile
+    # Update fields if provided (non-empty)
+    if name: profile.name = name.strip()
+    if company: profile.company = company.strip()
+    if email: profile.email = email.strip()
+    if role: profile.role = role.strip()
+    if use_case: profile.use_case = use_case.strip()
+    if team_size: profile.team_size = team_size.strip()
+    if timeline: profile.timeline = timeline.strip()
+
+    logger.info("Lead updated: %s", profile)
+    # Friendly confirmation message
+    return f"Thanks — I noted that. Current lead summary: {profile.name or '—'} / {profile.company or '—'} / {profile.email or '—'}."
 
 @function_tool
-async def set_size(
+async def submit_lead_and_end(
     ctx: RunContext[Userdata],
-    size: Annotated[
-        Literal["small", "medium", "large", "extra large"],
-        Field(description="📏 The size of the drink"),
-    ],
 ) -> str:
-    """📏 Set the size. Call when customer specifies drink size."""
-    ctx.userdata.order.size = size
-    print(f"✅ SIZE SET: {size.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"📏 {size.title()} size - perfect for your {ctx.userdata.order.drinkType}!"
+    profile = ctx.userdata.lead_profile
+    entry = asdict(profile)
+    entry["timestamp"] = datetime.now().isoformat()
 
-@function_tool
-async def set_milk(
-    ctx: RunContext[Userdata],
-    milk: Annotated[
-        Literal["whole", "skim", "almond", "oat", "soy", "coconut", "none"],
-        Field(description="🥛 The type of milk for the drink"),
-    ],
-) -> str:
-    """🥛 Set milk preference. Call when customer specifies milk type."""
-    ctx.userdata.order.milk = milk
-    print(f"✅ MILK SET: {milk.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    
-    if milk == "none":
-        return "🥛 Got it! Black coffee - strong and simple!"
-    return f"🥛 {milk.title()} milk - great choice!"
+    data = []
+    if os.path.exists(LEADS_FILE):
+        try:
+            with open(LEADS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not isinstance(data, list):
+                    data = []
+        except Exception:
+            data = []
 
-@function_tool
-async def set_extras(
-    ctx: RunContext[Userdata],
-    extras: Annotated[
-        list[Literal["sugar", "whipped cream", "caramel", "extra shot", "vanilla", "cinnamon", "honey"]] | None,
-        Field(description="🎯 List of extras, or empty/None for no extras"),
-    ] = None,
-) -> str:
-    """🎯 Set extras. Call when customer specifies add-ons or says no extras."""
-    ctx.userdata.order.extras = extras if extras else []
-    print(f"✅ EXTRAS SET: {ctx.userdata.order.extras}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    
-    if ctx.userdata.order.extras:
-        return f"🎯 Added {', '.join(ctx.userdata.order.extras)} - making it special!"
-    return "🎯 No extras - keeping it classic and delicious!"
-
-@function_tool
-async def set_name(
-    ctx: RunContext[Userdata],
-    name: Annotated[str, Field(description="👤 Customer's name for the order")],
-) -> str:
-    """👤 Set customer name. Call when customer provides their name."""
-    ctx.userdata.order.name = name.strip().title()
-    print(f"✅ NAME SET: {ctx.userdata.order.name}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"👤 Wonderful, {ctx.userdata.order.name}! Almost ready to complete your order!"
-
-@function_tool
-async def complete_order(ctx: RunContext[Userdata]) -> str:
-    """🎉 Finalize and save order to JSON. ONLY call when ALL fields are filled."""
-    order = ctx.userdata.order
-    
-    if not order.is_complete():
-        missing = []
-        if not order.drinkType: missing.append("☕ drink type")
-        if not order.size: missing.append("📏 size")
-        if not order.milk: missing.append("🥛 milk")
-        if order.extras is None: missing.append("🎯 extras")
-        if not order.name: missing.append("👤 name")
-        
-        print(f"❌ CANNOT COMPLETE - Missing: {', '.join(missing)}")
-        return f"🔄 Almost there! Just need: {', '.join(missing)}"
-    
-    print(f"🎉 ORDER READY FOR COMPLETION: {order.get_summary()}")
-    
+    data.append(entry)
     try:
-        save_order_to_json(order)
-        extras_text = f" with {', '.join(order.extras)}" if order.extras else ""
-        
-        print("\n" + "⭐" * 60)
-        print("🎉 ORDER COMPLETED SUCCESSFULLY!")
-        print(f"👤 Customer: {order.name}")
-        print(f"☕ Order: {order.size} {order.drinkType} with {order.milk} milk{extras_text}")
-        print("📺 ")
-        print("⭐" * 60 + "\n")
-        
-        return f"""🎉 PERFECT! Your {order.size} {order.drinkType} with {order.milk} milk{extras_text} is confirmed, {order.name}! 
-
-⏰ We're preparing your drink now - it'll be ready in 3-5 minutes!
-
-📺 **Thanks for using our AI Barista!** 
-👉 Don't forget rate Our Cafe"""
-        
+        with open(LEADS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        logger.info("Lead saved to %s", LEADS_FILE)
     except Exception as e:
-        print(f"❌ ORDER SAVE FAILED: {e}")
-        return "⚠️ Order recorded but there was a small issue. Don't worry, we'll make your drink right away!"
+        logger.exception("Failed to save lead: %s", e)
+        return "Sorry — I couldn't save your information right now. Please try again later."
 
-@function_tool
-async def get_order_status(ctx: RunContext[Userdata]) -> str:
-    """📊 Get current order status. Call when customer asks about their order."""
-    order = ctx.userdata.order
-    if order.is_complete():
-        return f"📊 Your order is complete! {order.get_summary()}"
-    
-    progress = order.get_summary()
-    return f"📊 Order in progress: {progress}"
+    # Friendly wrap-up message
+    name = profile.name or "there"
+    email = profile.email or "your email"
+    use_case = profile.use_case or "your use case"
+    return f"Thanks {name}! I have saved your details about {use_case}. We'll reach out at {email} with next steps. Goodbye!"
 
-class BaristaAgent(Agent):
+# ------------------------
+# SDR Agent definition
+# ------------------------
+class SDRAgent(Agent):
     def __init__(self):
         super().__init__(
-            instructions="""
-            🏪 You are a FRIENDLY and PROFESSIONAL barista at "Shish's Cafe".
-            
-            🎯 MISSION: Take coffee orders by systematically collecting:
-            ☕ Drink Type: latte, cappuccino, americano, espresso, mocha, coffee, cold brew, matcha
-            📏 Size: small, medium, large, extra large
-            🥛 Milk: whole, skim, almond, oat, soy, coconut, none
-            🎯 Extras: sugar, whipped cream, caramel, extra shot, vanilla, cinnamon, honey, or none
-            👤 Customer Name: for the order
-            
-            📝 PROCESS:
-            1. Greet warmly and ask for drink type
-            2. Ask for size preference  
-            3. Ask for milk choice
-            4. Ask about extras
-            5. Get customer name
-            6. Confirm and complete order
-            
-            🎨 STYLE:
-            - Be warm, enthusiastic, and professional
-            - Use emojis to make it friendly
-            - Ask one question at a time
-            - Confirm choices as you go
-            - Celebrate when order is complete
-            
-            🛠️ Use the function tools to record each piece of information.
-            📺 !
-            """,
-            tools=[
-                set_drink_type,
-                set_size,
-                set_milk,
-                set_extras,
-                set_name,
-                complete_order,
-                get_order_status,
-            ],
+            instructions=f"""
+You are Sarah, a professional and friendly Sales Development Representative for VipuXAi.
+Use the FAQ below to answer questions concisely and then qualify the lead conversationally.
+
+FAQ:
+{STORE_FAQ_TEXT}
+
+Goals:
+1. Answer user questions using the FAQ.
+2. Qualify leads by collecting: name, email, company/role, use case, team size, timeline.
+3. When the user provides information, call update_lead_profile with the fields provided.
+4. When the user is ready to finish, call submit_lead_and_end.
+
+Behavior rules:
+- Always be polite and concise.
+- Do not invent pricing or guarantees; if unsure, say "I'll confirm and email you".
+- Prefer to capture at least Name + Email + Use Case before ending the call.
+""",
+            tools=[update_lead_profile, submit_lead_and_end],
         )
 
-def create_empty_order():
-    """🆕 Create a fresh order state"""
-    return OrderState()
-
-# ======================================================
-# 💾 ORDER STORAGE & PERSISTENCE
-# ======================================================
-def get_orders_folder():
-    """📁 Get the orders directory path"""
-    base_dir = os.path.dirname(__file__)   # src/
-    backend_dir = os.path.abspath(os.path.join(base_dir, ".."))
-    folder = os.path.join(backend_dir, "orders")
-    os.makedirs(folder, exist_ok=True)
-    return folder
-
-def save_order_to_json(order: OrderState) -> str:
-    """💾 Save order to JSON file with enhanced logging"""
-    print(f"\n🔄 ATTEMPTING TO SAVE ORDER...")
-    folder = get_orders_folder()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"order_{timestamp}.json"
-    path = os.path.join(folder, filename)
-
+# ------------------------
+# Safe TTS creation with fallback
+# ------------------------
+def create_tts_with_fallback():
+    """
+    Try to create Murf TTS with a safe voice name; if it fails, return a Silero TTS fallback.
+    Use minimal params to avoid API errors.
+    """
+    murf_api_key = os.getenv("MURF_API_KEY")
+    # Preferred simple voice names (Murf plugin variants may differ)
+    preferred_voices = ["natalie", "matthew", "alicia", "ken"]
+    if murf_api_key:
+        for v in preferred_voices:
+            try:
+                t = murf.TTS(api_key=murf_api_key, voice=v)
+                # Optionally test a small synthesis? (not doing network test here)
+                logger.info("Using Murf TTS voice '%s'", v)
+                return t
+            except Exception as e:
+                logger.warning("Murf TTS voice '%s' failed: %s", v, e)
+    # Fallback to Silero TTS (local) if Murf is not available
     try:
-        order_data = order.to_dict()
-        order_data["timestamp"] = datetime.now().isoformat()
-        order_data["session_id"] = f"session_{timestamp}"
-        
-        with open(path, "w", encoding='utf-8') as f:
-            json.dump(order_data, f, indent=4, ensure_ascii=False)
-        
-        print("\n" + "✅" * 30)
-        print("🎉 ORDER SAVED SUCCESSFULLY!")
-        print(f"📁 Location: {path}")
-        print(f"👤 Customer: {order.name}")
-        print(f"☕ Order: {order.get_summary()}")
-        print("📺")
-        print("✅" * 30 + "\n")
-        
-        return path
-        
+        logger.info("Using Silero TTS fallback.")
+        return silero.TTS()
     except Exception as e:
-        print(f"\n❌ CRITICAL ERROR SAVING ORDER: {e}")
-        print(f"📁 Attempted path: {path}")
-        print("🚨 Please check directory permissions!")
-        raise e
+        logger.exception("Silero TTS also failed: %s", e)
+        # As final fallback, create a dummy object with expected interface to avoid crashes
+        class DummyTTS:
+            async def synthesize(self, text):
+                return b""  # silent
+        return DummyTTS()
 
-# ======================================================
-# 🧪 SYSTEM VALIDATION & TESTING
-# ======================================================
-def test_order_saving():
-    """🧪 Test function to verify order saving works"""
-    print("\n🧪 RUNNING ORDER SAVING TEST...")
-    
-    test_order = OrderState()
-    test_order.drinkType = "latte"
-    test_order.size = "medium"
-    test_order.milk = "oat"
-    test_order.extras = ["extra shot", "vanilla"]
-    test_order.name = "TestCustomer"
-    
-    try:
-        path = save_order_to_json(test_order)
-        print(f"🎯 TEST RESULT: ✅ SUCCESS - Saved to {path}")
-        return True
-    except Exception as e:
-        print(f"🎯 TEST RESULT: ❌ FAILED - {e}")
-        return False
-
-# ======================================================
-# 🔧 SYSTEM INITIALIZATION & PREWARMING
-# ======================================================
+# ------------------------
+# Entrypoint & session
+# ------------------------
 def prewarm(proc: JobProcess):
-    """🔥 Preload VAD model for better performance"""
-    print("🔥 Prewarming VAD model...")
-    proc.userdata["vad"] = silero.VAD.load()
-    print("✅ VAD model loaded successfully!")
+    # Load VAD if available for noise gating
+    try:
+        proc.userdata["vad"] = silero.VAD.load()
+    except Exception:
+        proc.userdata["vad"] = None
 
-# ======================================================
-# 🎬 AGENT SESSION MANAGEMENT
-# ======================================================
 async def entrypoint(ctx: JobContext):
-    """🎬 Main agent entrypoint - handles customer sessions"""
     ctx.log_context_fields = {"room": ctx.room.name}
+    logger.info("Starting VipuXAi SDR session")
 
-    print("\n" + "🏪" * 25)
-    print("🚀 BREW & BEAN CAFE - AI BARISTA")
-    print("👨‍⚕️ ")
-    print("📺 ")
-    print("📁 Orders folder:", get_orders_folder())
-    print("🎤 Ready to take customer orders!")
-    print("🏪" * 25 + "\n")
+    userdata = Userdata(lead_profile=LeadProfile())
 
-    # Run test to verify everything works
-    test_order_saving()
+    # Build TTS with fallback
+    tts_engine = create_tts_with_fallback()
 
-    # Create user session data with empty order
-    userdata = Userdata(order=create_empty_order())
-    
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"\n🆕 NEW CUSTOMER SESSION: {session_id}")
-    print(f"📝 Initial order state: {userdata.order.get_summary()}\n")
+    # Create STT and LLM objects with API keys
+    deepgram_api = os.getenv("DEEPGRAM_API_KEY")
+    google_api = os.getenv("GOOGLE_API_KEY")
 
-    # Create session with userdata
+    # Use minimal init forms that supply API keys if available
+    stt_obj = deepgram.STT(model="nova-3", api_key=deepgram_api)
+    llm_obj = google.LLM(model="gemini-2.5-flash", api_key=google_api)
+
+    # Make AgentSession
     session = AgentSession(
-        stt=deepgram.STT(model="nova-3"),
-        llm=google.LLM(model="gemini-2.5-flash"),
-        tts=murf.TTS(
-            voice="en-US-matthew",
-            style="Conversation",
-            text_pacing=True,
-        ),
+        stt=stt_obj,
+        llm=llm_obj,
+        tts=tts_engine,
         turn_detection=MultilingualModel(),
-        vad=ctx.proc.userdata["vad"],
-        userdata=userdata,  # Pass userdata to session
+        vad=ctx.proc.userdata.get("vad"),
+        userdata=userdata,
     )
 
-    # Metrics collection
-    usage_collector = metrics.UsageCollector()
-    @session.on("metrics_collected")
-    def _on_metrics(ev: MetricsCollectedEvent):
-        usage_collector.collect(ev.metrics)
+    # Attach session so tools can access it if needed
+    userdata.lead_profile  # just to ensure dataclass exists
+    # store session in userdata if tools need access later
+    try:
+        # Some versions expect session reference available via userdata
+        session_userdata = getattr(session, "userdata", None)
+    except Exception:
+        session_userdata = None
 
-    await session.start(
-        agent=BaristaAgent(),
-        room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
-        ),
-    )
+    # Start the agent; guard against TTS failures (try fallback)
+    try:
+        await session.start(
+            agent=SDRAgent(),
+            room=ctx.room,
+            room_input_options=RoomInputOptions(
+                noise_cancellation=noise_cancellation.BVC()
+            ),
+        )
+    except Exception as e:
+        logger.exception("AgentSession.start failed: %s", e)
+        # Try fallback: replace tts with Silero and restart
+        try:
+            fallback_tts = silero.TTS()
+            session.tts = fallback_tts
+            logger.info("Restarting session with Silero TTS fallback...")
+            await session.start(
+                agent=SDRAgent(),
+                room=ctx.room,
+                room_input_options=RoomInputOptions()
+            )
+        except Exception as e2:
+            logger.exception("Restart with fallback TTS failed: %s", e2)
+            # If restart fails, raise so process supervisor can handle it
+            raise
 
-    await ctx.connect()
+    # connect context if required by environment
+    try:
+        await ctx.connect()
+    except Exception:
+        logger.debug("ctx.connect() may not be required in this environment.")
 
-# ======================================================
-# ⚡ APPLICATION BOOTSTRAP & LAUNCH
-# ======================================================
 if __name__ == "__main__":
-    print("\n" + "⚡" * 25)
-    print("🎬 STARTING COFFEE SHOP AGENT...")
-    print("👨‍⚕️ ")
-    print("📺")
-    print("⚡" * 25 + "\n")
-    
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
