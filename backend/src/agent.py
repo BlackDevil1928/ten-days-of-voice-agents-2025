@@ -1,34 +1,24 @@
-
-
+# agent.py
 # ======================================================
-# 🎯 COFFEE SHOP VOICE AGENT TUTORIAL 
-# 👨‍⚕️ 
-# 💼 Professional Voice AI Development Course
-# 🚀 Advanced Agent Patterns & Real-world Implementation
-# ======================================================
-#
-# 🎉 
-# 📺 
-# 💡 Master AI Development with Real Projects
-#
+# 🏦 DAY 6: BANK FRAUD ALERT AGENT (SQLite DB variant)
 # ======================================================
 
 import logging
-import json
 import os
-import asyncio
+import sqlite3
 from datetime import datetime
-from typing import Annotated, Literal
-from dataclasses import dataclass, field
+from typing import Annotated, Optional
+from dataclasses import dataclass
 
-print("\n" + "🎯" * 50)
-print("🚀 COFFEE SHOP AGENT ")
-print("📚 ")
-print("💡 agent.py LOADED SUCCESSFULLY!")
-print("🎯" * 50 + "\n")
+print("\n" + "🛡️" * 30)
+print("🚀 BANK FRAUD AGENT (SQLite) - INITIALIZED")
+print("📚 TASKS: Verify Identity -> Check Transaction -> Update DB")
+print("🛡️" * 30 + "\n")
 
 from dotenv import load_dotenv
 from pydantic import Field
+
+# LiveKit agent framework imports
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -37,375 +27,286 @@ from livekit.agents import (
     RoomInputOptions,
     WorkerOptions,
     cli,
-    tokenize,
-    metrics,
-    MetricsCollectedEvent,
-    RunContext,
     function_tool,
+    RunContext,
 )
 
-from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
+# Plugins: use the imports compatible with your installed livekit package
+from livekit.plugins import silero, google, murf, deepgram, noise_cancellation
+
+# >>> FIX: import the turn detector class available in your environment
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
+logging.basicConfig(level=logging.INFO)
+
+# Load environment variables (optional)
+# Create a .env.local or .env in the same folder if required.
 load_dotenv(".env.local")
 
 # ======================================================
-# 🛒 ORDER MANAGEMENT SYSTEM
+# 💾 1. DATABASE SETUP (SQLite)
 # ======================================================
+
+DB_FILE = "fraud_db.sqlite"
+
+
 @dataclass
-class OrderState:
-    """☕ Coffee shop order state with validation"""
-    drinkType: str | None = None
-    size: str | None = None
-    milk: str | None = None
-    extras: list[str] = field(default_factory=list)
-    name: str | None = None
-    
-    def is_complete(self) -> bool:
-        """✅ Check if all required fields are filled"""
-        return all([
-            self.drinkType is not None,
-            self.size is not None,
-            self.milk is not None,
-            self.extras is not None,
-            self.name is not None
-        ])
-    
-    def to_dict(self) -> dict:
-        """📦 Convert to dictionary for JSON serialization"""
-        return {
-            "drinkType": self.drinkType,
-            "size": self.size,
-            "milk": self.milk,
-            "extras": self.extras,
-            "name": self.name
-        }
-    
-    def get_summary(self) -> str:
-        """📋 Get friendly order summary"""
-        if not self.is_complete():
-            return "🔄 Order in progress..."
-        
-        extras_text = f" with {', '.join(self.extras)}" if self.extras else ""
-        return f"☕ {self.size.upper()} {self.drinkType.title()} with {self.milk.title()} milk{extras_text} for {self.name}"
+class FraudCase:
+    userName: str
+    securityIdentifier: str
+    cardEnding: str
+    transactionName: str
+    transactionAmount: str
+    transactionTime: str
+    transactionSource: str
+    case_status: str = "pending_review"
+    notes: str = ""
+
+
+def get_db_path():
+    # ensure path resolves even if __file__ is run from another cwd
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, DB_FILE)
+
+
+def get_conn():
+    path = get_db_path()
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def seed_database():
+    """Create SQLite DB and insert sample rows if empty."""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fraud_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            userName TEXT NOT NULL,
+            securityIdentifier TEXT,
+            cardEnding TEXT,
+            transactionName TEXT,
+            transactionAmount TEXT,
+            transactionTime TEXT,
+            transactionSource TEXT,
+            case_status TEXT DEFAULT 'pending_review',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+    cur.execute("SELECT COUNT(1) FROM fraud_cases")
+    if cur.fetchone()[0] == 0:
+        sample_data = [
+            (
+                "John", "12345", "4242",
+                "ABC Industry", "$450.00", "2:30 AM EST", "alibaba.com",
+                "pending_review", "Automated flag: High value transaction."
+            ),
+            (
+                "Sarah", "99887", "1199",
+                "Unknown Crypto Exchange", "$2,100.00", "4:15 AM PST", "online_transfer",
+                "pending_review", "Automated flag: Unusual location."
+            )
+        ]
+        cur.executemany(
+            """
+            INSERT INTO fraud_cases (
+                userName, securityIdentifier, cardEnding, transactionName,
+                transactionAmount, transactionTime, transactionSource, case_status, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            sample_data,
+        )
+        conn.commit()
+        print(f"✅ SQLite DB seeded at {path}")
+
+    conn.close()
+
+
+# Initialize DB on load
+seed_database()
+
+# ======================================================
+# 🧠 2. STATE MANAGEMENT
+# ======================================================
 
 @dataclass
 class Userdata:
-    """👤 User session data"""
-    order: OrderState
-    session_start: datetime = field(default_factory=datetime.now)
+    active_case: Optional[FraudCase] = None
+
 
 # ======================================================
-# 🛠️ BARISTA AGENT FUNCTION TOOLS
+# 🛠️ 3. FRAUD AGENT TOOLS (SQLite-backed)
 # ======================================================
 
 @function_tool
-async def set_drink_type(
+async def lookup_customer(
     ctx: RunContext[Userdata],
-    drink: Annotated[
-        Literal["latte", "cappuccino", "americano", "espresso", "mocha", "coffee", "cold brew", "matcha"],
-        Field(description="🎯 The type of coffee drink the customer wants"),
-    ],
+    name: Annotated[str, Field(description="The name the user provides")],
 ) -> str:
-    """☕ Set the drink type. Call when customer specifies which coffee they want."""
-    ctx.userdata.order.drinkType = drink
-    print(f"✅ DRINK SET: {drink.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"☕ Excellent choice! One {drink} coming up!"
-
-@function_tool
-async def set_size(
-    ctx: RunContext[Userdata],
-    size: Annotated[
-        Literal["small", "medium", "large", "extra large"],
-        Field(description="📏 The size of the drink"),
-    ],
-) -> str:
-    """📏 Set the size. Call when customer specifies drink size."""
-    ctx.userdata.order.size = size
-    print(f"✅ SIZE SET: {size.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"📏 {size.title()} size - perfect for your {ctx.userdata.order.drinkType}!"
-
-@function_tool
-async def set_milk(
-    ctx: RunContext[Userdata],
-    milk: Annotated[
-        Literal["whole", "skim", "almond", "oat", "soy", "coconut", "none"],
-        Field(description="🥛 The type of milk for the drink"),
-    ],
-) -> str:
-    """🥛 Set milk preference. Call when customer specifies milk type."""
-    ctx.userdata.order.milk = milk
-    print(f"✅ MILK SET: {milk.upper()}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    
-    if milk == "none":
-        return "🥛 Got it! Black coffee - strong and simple!"
-    return f"🥛 {milk.title()} milk - great choice!"
-
-@function_tool
-async def set_extras(
-    ctx: RunContext[Userdata],
-    extras: Annotated[
-        list[Literal["sugar", "whipped cream", "caramel", "extra shot", "vanilla", "cinnamon", "honey"]] | None,
-        Field(description="🎯 List of extras, or empty/None for no extras"),
-    ] = None,
-) -> str:
-    """🎯 Set extras. Call when customer specifies add-ons or says no extras."""
-    ctx.userdata.order.extras = extras if extras else []
-    print(f"✅ EXTRAS SET: {ctx.userdata.order.extras}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    
-    if ctx.userdata.order.extras:
-        return f"🎯 Added {', '.join(ctx.userdata.order.extras)} - making it special!"
-    return "🎯 No extras - keeping it classic and delicious!"
-
-@function_tool
-async def set_name(
-    ctx: RunContext[Userdata],
-    name: Annotated[str, Field(description="👤 Customer's name for the order")],
-) -> str:
-    """👤 Set customer name. Call when customer provides their name."""
-    ctx.userdata.order.name = name.strip().title()
-    print(f"✅ NAME SET: {ctx.userdata.order.name}")
-    print(f"📊 Order Progress: {ctx.userdata.order.get_summary()}")
-    return f"👤 Wonderful, {ctx.userdata.order.name}! Almost ready to complete your order!"
-
-@function_tool
-async def complete_order(ctx: RunContext[Userdata]) -> str:
-    """🎉 Finalize and save order to JSON. ONLY call when ALL fields are filled."""
-    order = ctx.userdata.order
-    
-    if not order.is_complete():
-        missing = []
-        if not order.drinkType: missing.append("☕ drink type")
-        if not order.size: missing.append("📏 size")
-        if not order.milk: missing.append("🥛 milk")
-        if order.extras is None: missing.append("🎯 extras")
-        if not order.name: missing.append("👤 name")
-        
-        print(f"❌ CANNOT COMPLETE - Missing: {', '.join(missing)}")
-        return f"🔄 Almost there! Just need: {', '.join(missing)}"
-    
-    print(f"🎉 ORDER READY FOR COMPLETION: {order.get_summary()}")
-    
+    """Lookup a customer in SQLite DB."""
+    logger.info(f"🔎 LOOKING UP: {name}")
     try:
-        save_order_to_json(order)
-        extras_text = f" with {', '.join(order.extras)}" if order.extras else ""
-        
-        print("\n" + "⭐" * 60)
-        print("🎉 ORDER COMPLETED SUCCESSFULLY!")
-        print(f"👤 Customer: {order.name}")
-        print(f"☕ Order: {order.size} {order.drinkType} with {order.milk} milk{extras_text}")
-        print("📺 ")
-        print("⭐" * 60 + "\n")
-        
-        return f"""🎉 PERFECT! Your {order.size} {order.drinkType} with {order.milk} milk{extras_text} is confirmed, {order.name}! 
+        conn = get_conn()
+        cur = conn.cursor()
 
-⏰ We're preparing your drink now - it'll be ready in 3-5 minutes!
+        cur.execute(
+            "SELECT * FROM fraud_cases WHERE LOWER(userName) = LOWER(?) LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+        conn.close()
 
-📺 **Thanks for using our AI Barista!** 
-👉 Don't forget rate Our Cafe"""
-        
+        if not row:
+            return "User not found in the fraud database. Please repeat the name."
+
+        record = dict(row)
+        ctx.userdata.active_case = FraudCase(
+            userName=record["userName"],
+            securityIdentifier=record["securityIdentifier"],
+            cardEnding=record["cardEnding"],
+            transactionName=record["transactionName"],
+            transactionAmount=record["transactionAmount"],
+            transactionTime=record["transactionTime"],
+            transactionSource=record["transactionSource"],
+            case_status=record["case_status"],
+            notes=record["notes"],
+        )
+
+        return (
+            f"Record Found.\n"
+            f"User: {record['userName']}\n"
+            f"Security ID (Expected): {record['securityIdentifier']}\n"
+            f"Transaction: {record['transactionAmount']} at {record['transactionName']} ({record['transactionSource']})\n"
+            f"Ask user for their Security Identifier now."
+        )
+
     except Exception as e:
-        print(f"❌ ORDER SAVE FAILED: {e}")
-        return "⚠️ Order recorded but there was a small issue. Don't worry, we'll make your drink right away!"
+        logger.exception("Database lookup failed")
+        return f"Database error: {str(e)}"
+
 
 @function_tool
-async def get_order_status(ctx: RunContext[Userdata]) -> str:
-    """📊 Get current order status. Call when customer asks about their order."""
-    order = ctx.userdata.order
-    if order.is_complete():
-        return f"📊 Your order is complete! {order.get_summary()}"
-    
-    progress = order.get_summary()
-    return f"📊 Order in progress: {progress}"
+async def resolve_fraud_case(
+    ctx: RunContext[Userdata],
+    status: Annotated[str, Field(description="confirmed_safe or confirmed_fraud")],
+    notes: Annotated[str, Field(description="Notes on the user's confirmation")],
+) -> str:
 
-class BaristaAgent(Agent):
+    if not ctx.userdata.active_case:
+        return "Error: No active case selected."
+
+    case = ctx.userdata.active_case
+    case.case_status = status
+    case.notes = notes
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            UPDATE fraud_cases
+            SET case_status = ?, notes = ?, updated_at = datetime('now')
+            WHERE userName = ?
+            """,
+            (case.case_status, case.notes, case.userName),
+        )
+        conn.commit()
+
+        # Confirm updated row
+        cur.execute("SELECT * FROM fraud_cases WHERE userName = ?", (case.userName,))
+        updated_row = dict(cur.fetchone())
+        conn.close()
+
+        logger.info(f"✅ CASE UPDATED: {case.userName} -> {status}")
+
+        if status == "confirmed_fraud":
+            return (
+                f"Fraud confirmed. Card ending {case.cardEnding} is now BLOCKED. "
+                f"A replacement card will be issued.\n"
+                f"DB Updated At: {updated_row['updated_at']}"
+            )
+        else:
+            return (
+                f"Transaction marked SAFE. Restrictions lifted.\n"
+                f"DB Updated At: {updated_row['updated_at']}"
+            )
+
+    except Exception as e:
+        logger.exception("Failed to update case")
+        return f"Error saving to DB: {e}"
+
+
+# ======================================================
+# 🤖 4. AGENT DEFINITION
+# ======================================================
+
+class FraudAgent(Agent):
     def __init__(self):
         super().__init__(
             instructions="""
-            🏪 You are a FRIENDLY and PROFESSIONAL barista at "Shish's Cafe".
-            
-            🎯 MISSION: Take coffee orders by systematically collecting:
-            ☕ Drink Type: latte, cappuccino, americano, espresso, mocha, coffee, cold brew, matcha
-            📏 Size: small, medium, large, extra large
-            🥛 Milk: whole, skim, almond, oat, soy, coconut, none
-            🎯 Extras: sugar, whipped cream, caramel, extra shot, vanilla, cinnamon, honey, or none
-            👤 Customer Name: for the order
-            
-            📝 PROCESS:
-            1. Greet warmly and ask for drink type
-            2. Ask for size preference  
-            3. Ask for milk choice
-            4. Ask about extras
-            5. Get customer name
-            6. Confirm and complete order
-            
-            🎨 STYLE:
-            - Be warm, enthusiastic, and professional
-            - Use emojis to make it friendly
-            - Ask one question at a time
-            - Confirm choices as you go
-            - Celebrate when order is complete
-            
-            🛠️ Use the function tools to record each piece of information.
-            📺 !
+            You are 'Alex', a Fraud Detection Specialist at VIPU national Bank.
+            Follow strict security protocol:
+
+            1. Greeting + ask for first name.
+            2. Immediately call lookup_customer(name).
+            3. Ask for Security Identifier.
+            4. If correct → continue. If incorrect → end call politely.
+            5. Explain suspicious transaction.
+            6. Ask: Did you make this transaction?
+               - YES → resolve_fraud_case('confirmed_safe')
+               - NO → resolve_fraud_case('confirmed_fraud')
+            7. Close professionally.
             """,
-            tools=[
-                set_drink_type,
-                set_size,
-                set_milk,
-                set_extras,
-                set_name,
-                complete_order,
-                get_order_status,
-            ],
+            tools=[lookup_customer, resolve_fraud_case],
         )
 
-def create_empty_order():
-    """🆕 Create a fresh order state"""
-    return OrderState()
 
 # ======================================================
-# 💾 ORDER STORAGE & PERSISTENCE
+# 🎬 ENTRYPOINT
 # ======================================================
-def get_orders_folder():
-    """📁 Get the orders directory path"""
-    base_dir = os.path.dirname(__file__)   # src/
-    backend_dir = os.path.abspath(os.path.join(base_dir, ".."))
-    folder = os.path.join(backend_dir, "orders")
-    os.makedirs(folder, exist_ok=True)
-    return folder
 
-def save_order_to_json(order: OrderState) -> str:
-    """💾 Save order to JSON file with enhanced logging"""
-    print(f"\n🔄 ATTEMPTING TO SAVE ORDER...")
-    folder = get_orders_folder()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"order_{timestamp}.json"
-    path = os.path.join(folder, filename)
-
-    try:
-        order_data = order.to_dict()
-        order_data["timestamp"] = datetime.now().isoformat()
-        order_data["session_id"] = f"session_{timestamp}"
-        
-        with open(path, "w", encoding='utf-8') as f:
-            json.dump(order_data, f, indent=4, ensure_ascii=False)
-        
-        print("\n" + "✅" * 30)
-        print("🎉 ORDER SAVED SUCCESSFULLY!")
-        print(f"📁 Location: {path}")
-        print(f"👤 Customer: {order.name}")
-        print(f"☕ Order: {order.get_summary()}")
-        print("📺")
-        print("✅" * 30 + "\n")
-        
-        return path
-        
-    except Exception as e:
-        print(f"\n❌ CRITICAL ERROR SAVING ORDER: {e}")
-        print(f"📁 Attempted path: {path}")
-        print("🚨 Please check directory permissions!")
-        raise e
-
-# ======================================================
-# 🧪 SYSTEM VALIDATION & TESTING
-# ======================================================
-def test_order_saving():
-    """🧪 Test function to verify order saving works"""
-    print("\n🧪 RUNNING ORDER SAVING TEST...")
-    
-    test_order = OrderState()
-    test_order.drinkType = "latte"
-    test_order.size = "medium"
-    test_order.milk = "oat"
-    test_order.extras = ["extra shot", "vanilla"]
-    test_order.name = "TestCustomer"
-    
-    try:
-        path = save_order_to_json(test_order)
-        print(f"🎯 TEST RESULT: ✅ SUCCESS - Saved to {path}")
-        return True
-    except Exception as e:
-        print(f"🎯 TEST RESULT: ❌ FAILED - {e}")
-        return False
-
-# ======================================================
-# 🔧 SYSTEM INITIALIZATION & PREWARMING
-# ======================================================
 def prewarm(proc: JobProcess):
-    """🔥 Preload VAD model for better performance"""
-    print("🔥 Prewarming VAD model...")
+    # load VAD into process userdata so entrypoint can reuse it
     proc.userdata["vad"] = silero.VAD.load()
-    print("✅ VAD model loaded successfully!")
 
-# ======================================================
-# 🎬 AGENT SESSION MANAGEMENT
-# ======================================================
+
 async def entrypoint(ctx: JobContext):
-    """🎬 Main agent entrypoint - handles customer sessions"""
     ctx.log_context_fields = {"room": ctx.room.name}
+    logger.info("🚀 STARTING FRAUD ALERT SESSION (SQLite)")
 
-    print("\n" + "🏪" * 25)
-    print("🚀 BREW & BEAN CAFE - AI BARISTA")
-    print("👨‍⚕️ ")
-    print("📺 ")
-    print("📁 Orders folder:", get_orders_folder())
-    print("🎤 Ready to take customer orders!")
-    print("🏪" * 25 + "\n")
+    userdata = Userdata()
 
-    # Run test to verify everything works
-    test_order_saving()
-
-    # Create user session data with empty order
-    userdata = Userdata(order=create_empty_order())
-    
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"\n🆕 NEW CUSTOMER SESSION: {session_id}")
-    print(f"📝 Initial order state: {userdata.order.get_summary()}\n")
-
-    # Create session with userdata
+    # >>> USE the MultilingualModel from the multilingual module (this matches your livekit install)
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
         tts=murf.TTS(
-            voice="en-US-matthew",
-            style="Conversation",
+            voice="en-US-marcus",
+            style="Conversational",
             text_pacing=True,
         ),
-        turn_detection=MultilingualModel(),
+        turn_detection=MultilingualModel(),   # <-- CORRECT: MultilingualModel
         vad=ctx.proc.userdata["vad"],
-        userdata=userdata,  # Pass userdata to session
+        userdata=userdata,
     )
 
-    # Metrics collection
-    usage_collector = metrics.UsageCollector()
-    @session.on("metrics_collected")
-    def _on_metrics(ev: MetricsCollectedEvent):
-        usage_collector.collect(ev.metrics)
-
     await session.start(
-        agent=BaristaAgent(),
+        agent=FraudAgent(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
-        ),
+        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     )
 
     await ctx.connect()
 
-# ======================================================
-# ⚡ APPLICATION BOOTSTRAP & LAUNCH
-# ======================================================
+
 if __name__ == "__main__":
-    print("\n" + "⚡" * 25)
-    print("🎬 STARTING COFFEE SHOP AGENT...")
-    print("👨‍⚕️ ")
-    print("📺")
-    print("⚡" * 25 + "\n")
-    
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
